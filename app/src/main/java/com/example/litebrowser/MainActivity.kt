@@ -95,19 +95,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        CookieManager.getInstance().flush()
+        try {
+            CookieManager.getInstance().flush()
+        } catch (_: Exception) { }
     }
 
     override fun onStop() {
         super.onStop()
-        CookieManager.getInstance().flush()
+        try {
+            CookieManager.getInstance().flush()
+        } catch (_: Exception) { }
     }
 
     private fun isNetworkAvailable(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val capabilities = cm.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = cm.activeNetwork ?: return false
+            val capabilities = cm.getNetworkCapabilities(network) ?: return false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (_: Exception) {
+            true
+        }
     }
 
     // --- سجل تصفح دائم وغير محدود على ذاكرة الهاتف ---
@@ -535,7 +543,6 @@ class MainActivity : AppCompatActivity() {
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
 
-        // استخدام ذاكرة الهاتف المخزنة أولاً لتوفير الإنترنت وعدم إعادة تحميل الصفحات والخرائط
         settings.cacheMode = if (isNetworkAvailable()) {
             WebSettings.LOAD_CACHE_ELSE_NETWORK
         } else {
@@ -545,9 +552,11 @@ class MainActivity : AppCompatActivity() {
         @Suppress("DEPRECATION")
         settings.saveFormData = true
 
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
+        try {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            cookieManager.setAcceptThirdPartyCookies(webView, true)
+        } catch (_: Exception) { }
 
         webView.setBackgroundColor(Color.TRANSPARENT)
         webView.addJavascriptInterface(PasswordBridge(), "AndroidPasswordVault")
@@ -601,7 +610,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                CookieManager.getInstance().flush()
+                try {
+                    CookieManager.getInstance().flush()
+                } catch (_: Exception) { }
 
                 if (url != null && url != "about:blank") {
                     urlInput.setText(url)
@@ -744,7 +755,6 @@ class MainActivity : AppCompatActivity() {
         var url = input.trim()
         if (url.isEmpty()) return
 
-        // تحديث وضع الكاش تلقائياً حسب توفر الإنترنت
         webView.settings.cacheMode = if (isNetworkAvailable()) {
             WebSettings.LOAD_CACHE_ELSE_NETWORK
         } else {

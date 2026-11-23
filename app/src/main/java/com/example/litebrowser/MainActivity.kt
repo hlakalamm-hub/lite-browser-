@@ -565,8 +565,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             WebSettings.LOAD_DEFAULT
         }
-        // هوية متصفح Chrome رسمية لتجنب حظر المواقع وصفحات التحقق
-        settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        // إزالة التعديل اليدوي على User-Agent لتطابق بصمة الجهاز الحقيقية ولا يشك فيها نظام Captcha
         @Suppress("DEPRECATION")
         settings.saveFormData = true
 
@@ -614,6 +613,11 @@ class MainActivity : AppCompatActivity() {
                 val host = uri.host?.lowercase() ?: ""
                 val urlString = uri.toString().lowercase()
 
+                // السماح لنظام التحقق الأمني (reCAPTCHA) بالعمل دون حظر
+                if (urlString.contains("recaptcha") || host.contains("gstatic.com")) {
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 // 1. حظر الإعلانات
                 if (isAdHost(host)) return emptyResponse()
 
@@ -635,7 +639,10 @@ class MainActivity : AppCompatActivity() {
                     addToHistory(view?.title, url)
                 }
 
-                if (isMediaBlocked && url != "about:blank") {
+                // عدم إخفاء عناصر الصفحة إذا كانت صفحة تحقق أمان (Sorry / Captcha)
+                val isCaptchaPage = url?.contains("/sorry/") == true || url?.contains("captcha") == true
+
+                if (isMediaBlocked && url != "about:blank" && !isCaptchaPage) {
                     val jsBlockMedia = """
                         (function() {
                             document.querySelectorAll('video, audio, source, track').forEach(el => el.remove());
@@ -776,8 +783,12 @@ class MainActivity : AppCompatActivity() {
         var url = input.trim()
         if (url.isEmpty()) return
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = if (url.contains(".") && !url.contains(" ")) "https://$url"
-            else "https://www.google.com/search?q=${Uri.encode(url)}"
+            url = if (url.contains(".") && !url.contains(" ")) {
+                "https://$url"
+            } else {
+                // استخدام DuckDuckGo للبحث السريع بدون إزعاج Captcha عند تشغيل VPN
+                "https://html.duckduckgo.com/html/?q=${Uri.encode(url)}"
+            }
         }
         webView.loadUrl(url)
     }

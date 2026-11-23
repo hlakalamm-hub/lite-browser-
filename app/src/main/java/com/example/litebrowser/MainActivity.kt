@@ -358,6 +358,7 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(PasswordBridge(), "AndroidPasswordVault")
         applyMediaBlockingSettings()
         applyDarkModeSettings()
+        webView.setBackgroundColor(Color.TRANSPARENT)
     }
 
     private fun applyMediaBlockingSettings() {

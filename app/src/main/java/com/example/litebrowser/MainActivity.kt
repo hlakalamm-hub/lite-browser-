@@ -21,10 +21,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.*
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.MessageDigest
+import java.io.BufferedReader
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.InputStreamReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -58,9 +58,6 @@ class MainActivity : AppCompatActivity() {
     private val historyList = mutableListOf<HistoryItem>()
     private var isPopupShowing = false
 
-    // مجلد التخزين الدائم غير المحدود على ذاكرة الهاتف
-    private lateinit var permanentCacheDir: File
-
     private val csvPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let { importPasswordsFromCsv(it) }
     }
@@ -69,9 +66,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
-        permanentCacheDir = File(filesDir, "permanent_web_cache")
-        if (!permanentCacheDir.exists()) permanentCacheDir.mkdirs()
 
         loadAdHostsFromAssets()
         loadSavedCredentials()
@@ -109,78 +103,27 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().flush()
     }
 
-    // --- نظام التخزين الدائم غير المحدود (Offline Disk Cache) ---
+    // --- حساب حجم الكاش وتفريغه ---
 
-    private fun md5(input: String): String {
-        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun getCachedResponse(url: String): WebResourceResponse? {
-        if (!isOfflineCacheEnabled) return null
-        val hash = md5(url)
-        val dataFile = File(permanentCacheDir, "$hash.dat")
-        val metaFile = File(permanentCacheDir, "$hash.meta")
-
-        if (dataFile.exists() && metaFile.exists()) {
-            return try {
-                val metaLines = metaFile.readLines()
-                val mimeType = metaLines.getOrElse(0) { "text/html" }
-                val encoding = metaLines.getOrElse(1) { "UTF-8" }
-                WebResourceResponse(mimeType, encoding, FileInputStream(dataFile))
-            } catch (_: Exception) {
-                null
-            }
+    private fun getFolderSize(dir: File?): Long {
+        if (dir == null || !dir.exists()) return 0L
+        var size = 0L
+        dir.listFiles()?.forEach { file ->
+            size += if (file.isDirectory) getFolderSize(file) else file.length()
         }
-        return null
-    }
-
-    private fun fetchAndCacheResource(urlString: String, requestHeaders: Map<String, String>?): WebResourceResponse? {
-        return try {
-            val url = URL(urlString)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.connectTimeout = 10000
-            conn.readTimeout = 15000
-            conn.instanceFollowRedirects = true
-            requestHeaders?.forEach { (k, v) ->
-                if (!k.equals("Accept-Encoding", ignoreCase = true)) {
-                    conn.setRequestProperty(k, v)
-                }
-            }
-            val code = conn.responseCode
-            if (code in 200..299) {
-                val contentType = conn.contentType ?: "application/octet-stream"
-                val mimeType = contentType.substringBefore(";").trim()
-                val encoding = if (contentType.contains("charset=", ignoreCase = true)) {
-                    contentType.substringAfter("charset=").substringBefore(";").trim()
-                } else "UTF-8"
-
-                val bytes = conn.inputStream.use { it.readBytes() }
-                if (bytes.isNotEmpty()) {
-                    val hash = md5(urlString)
-                    File(permanentCacheDir, "$hash.dat").writeBytes(bytes)
-                    File(permanentCacheDir, "$hash.meta").writeText("$mimeType\n$encoding\n$urlString")
-                }
-                WebResourceResponse(mimeType, encoding, ByteArrayInputStream(bytes))
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
+        return size
     }
 
     private fun getCacheSizeMB(): String {
-        var totalBytes = 0L
-        permanentCacheDir.listFiles()?.forEach { totalBytes += it.length() }
+        val totalBytes = getFolderSize(cacheDir) + getFolderSize(File(applicationInfo.dataDir, "app_webview"))
         val mb = totalBytes / (1024.0 * 1024.0)
         return String.format(Locale.US, "%.2f MB", mb)
     }
 
-    private fun clearPermanentCache() {
-        permanentCacheDir.listFiles()?.forEach { it.delete() }
+    private fun clearBrowserCache() {
         webView.clearCache(true)
-        Toast.makeText(this, "تم تفريغ ذاكرة التخزين المؤقت بالكامل", Toast.LENGTH_SHORT).show()
+        cacheDir.deleteRecursively()
+        Toast.makeText(this, "تم تفريغ ذاكرة التخزين المؤقت", Toast.LENGTH_SHORT).show()
     }
 
     // --- إدارة سجل التصفح الدائم غير المحدود ---
@@ -211,7 +154,6 @@ class MainActivity : AppCompatActivity() {
 
         if (historyList.isNotEmpty() && historyList[0].url == url) return
 
-        // سجل غير محدود يحفظ كل الصفحات على ذاكرة الهاتف
         historyList.add(0, HistoryItem(cleanTitle, url, timeStr))
         persistHistory()
     }
@@ -399,7 +341,7 @@ class MainActivity : AppCompatActivity() {
             optionsList.add("⚡ تعبئة حساب لهذا الموقع (${siteMatches.size} متاح)")
         }
         optionsList.add("🕒 سجل التصفح الدائم (${historyList.size})")
-        optionsList.add("💾 التخزين المحلي (${getCacheSizeMB()}) - ${if (isOfflineCacheEnabled) "مفعل ✅" else "معطل ❌"}")
+        optionsList.add("💾 توفير البيانات بالكاش (${getCacheSizeMB()}) - ${if (isOfflineCacheEnabled) "مفعل ✅" else "معطل ❌"}")
         optionsList.add("🧹 تفريغ ذاكرة التخزين المؤقت")
         optionsList.add("📂 استيراد كلمات المرور من CSV")
         optionsList.add("📋 عرض كلمات المرور المحفوظة (${credentialsList.size})")
@@ -427,11 +369,11 @@ class MainActivity : AppCompatActivity() {
                         }
                         Toast.makeText(
                             this,
-                            if (isOfflineCacheEnabled) "تم تفعيل الحفظ الدائم لتوفير الإنترنت" else "تم إيقاف الحفظ الدائم",
+                            if (isOfflineCacheEnabled) "تم تفعيل القراءة من الكاش لتوفير الإنترنت" else "تم التبديل للوضع العادي",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
-                    2 -> clearPermanentCache()
+                    2 -> clearBrowserCache()
                     3 -> csvPickerLauncher.launch("*/*")
                     4 -> showSavedListDialog()
                     5 -> {
@@ -618,8 +560,13 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
-        // إجبار المتصفح على القراءة من ذاكرة الهاتف أولاً وعدم إعادة التحميل من الإنترنت
-        settings.cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
+        settings.cacheMode = if (isOfflineCacheEnabled) {
+            WebSettings.LOAD_CACHE_ELSE_NETWORK
+        } else {
+            WebSettings.LOAD_DEFAULT
+        }
+        // هوية متصفح Chrome رسمية لتجنب حظر المواقع وصفحات التحقق
+        settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         @Suppress("DEPRECATION")
         settings.saveFormData = true
 
@@ -666,7 +613,6 @@ class MainActivity : AppCompatActivity() {
                 val uri = request?.url ?: return null
                 val host = uri.host?.lowercase() ?: ""
                 val urlString = uri.toString().lowercase()
-                val rawUrl = uri.toString()
 
                 // 1. حظر الإعلانات
                 if (isAdHost(host)) return emptyResponse()
@@ -675,19 +621,6 @@ class MainActivity : AppCompatActivity() {
                 if (isMediaBlocked) {
                     val blockedExtensions = listOf(".mp4", ".webm", ".gif", ".m3u8", ".ts", ".avi", ".mov", ".webp", ".jpg", ".jpeg", ".png", ".svg")
                     if (blockedExtensions.any { urlString.contains(it) }) return emptyResponse()
-                }
-
-                // 3. التحقق من المخزن الدائم على الهاتف أولاً (توفير 100% من الإنترنت للملفات المحملة سابقاً)
-                if (isOfflineCacheEnabled && request.method.equals("GET", ignoreCase = true) && rawUrl.startsWith("http")) {
-                    val cached = getCachedResponse(rawUrl)
-                    if (cached != null) {
-                        return cached
-                    }
-                    // إذا لم يكن محفوظاً من قبل، نحمله ونخزنه على ذاكرة الهاتف للأبد
-                    val fetched = fetchAndCacheResource(rawUrl, request.requestHeaders)
-                    if (fetched != null) {
-                        return fetched
-                    }
                 }
 
                 return super.shouldInterceptRequest(view, request)
@@ -825,16 +758,15 @@ class MainActivity : AppCompatActivity() {
             showHistoryDialog()
             true
         }
-        // الضغط العادي على تحديث يجلب الصفحة من الكاش، والضغط المطول يجلب نسخة جديدة من الإنترنت
         btnReload.setOnClickListener { webView.reload() }
         btnReload.setOnLongClickListener {
-            val currentUrl = webView.url
-            if (!currentUrl.isNullOrBlank() && currentUrl != "about:blank") {
-                val hash = md5(currentUrl)
-                File(permanentCacheDir, "$hash.dat").delete()
-                File(permanentCacheDir, "$hash.meta").delete()
-                Toast.makeText(this, "جاري تحديث الصفحة من الإنترنت...", Toast.LENGTH_SHORT).show()
-                webView.reload()
+            webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
+            Toast.makeText(this, "جاري تحديث الصفحة من الإنترنت...", Toast.LENGTH_SHORT).show()
+            webView.reload()
+            if (isOfflineCacheEnabled) {
+                webView.postDelayed({
+                    webView.settings.cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
+                }, 3000)
             }
             true
         }

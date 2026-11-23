@@ -43,8 +43,8 @@ class MainActivity : AppCompatActivity() {
     private var isDarkModeEnabled = true
     private val adHostsSet = HashSet<String>()
     private val credentialsList = mutableListOf<SavedCredential>()
+    private var isPopupShowing = false
 
-    // أداة اختيار ملف CSV من ذاكرة الهاتف
     private val csvPickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let { importPasswordsFromCsv(it) }
     }
@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
         setupWebViewClients()
         setupButtons(btnHome, btnReload, btnPasswords)
 
-        loadUrl("https://www.google.com")
+        webView.loadUrl("about:blank")
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -118,7 +118,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveOrUpdateCredential(domain: String, username: String, password: String) {
         val cleanDomain = extractRootDomain(domain)
-        if (cleanDomain.isEmpty() || username.isEmpty() || password.isEmpty()) return
+        if (cleanDomain.isEmpty() || password.isEmpty()) return
 
         val existingIndex = credentialsList.indexOfFirst {
             it.domain.equals(cleanDomain, ignoreCase = true) && it.username == username
@@ -131,16 +131,31 @@ class MainActivity : AppCompatActivity() {
         persistCredentials()
     }
 
+    // استخراج النطاق الأساسي بدقة (مثلاً m.facebook.com -> facebook.com)
     private fun extractRootDomain(urlOrHost: String): String {
         return try {
             val uri = if (urlOrHost.startsWith("http")) Uri.parse(urlOrHost) else Uri.parse("https://$urlOrHost")
-            (uri.host ?: urlOrHost).removePrefix("www.").lowercase()
+            val host = (uri.host ?: urlOrHost).lowercase().removePrefix("www.")
+            val parts = host.split(".")
+            if (parts.size >= 2) {
+                "${parts[parts.size - 2]}.${parts[parts.size - 1]}"
+            } else host
         } catch (_: Exception) {
             urlOrHost.lowercase()
         }
     }
 
-    // استيراد كلمات المرور من ملف CSV (تنسيق Chrome / Edge / Brave)
+    private fun getMatchingCredentialsForCurrentSite(url: String?): List<SavedCredential> {
+        if (url.isNullOrBlank() || url == "about:blank") return emptyList()
+        val currentRoot = extractRootDomain(url)
+        val fullHost = try { Uri.parse(url).host?.lowercase() ?: "" } catch (_: Exception) { "" }
+
+        return credentialsList.filter { cred ->
+            val savedRoot = extractRootDomain(cred.domain)
+            savedRoot == currentRoot || fullHost.contains(cred.domain) || cred.domain.contains(currentRoot)
+        }
+    }
+
     private fun importPasswordsFromCsv(uri: Uri) {
         try {
             var importedCount = 0
@@ -157,7 +172,6 @@ class MainActivity : AppCompatActivity() {
 
                         if (isFirstLine) {
                             isFirstLine = false
-                            // تحديد ترتيب الأعمدة تلقائياً من ترويسة الملف
                             cols.forEachIndexed { index, header ->
                                 when (header.trim().lowercase()) {
                                     "url", "website", "origin" -> urlIdx = index
@@ -181,12 +195,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             Toast.makeText(this, "تم استيراد $importedCount كلمة مرور بنجاح!", Toast.LENGTH_LONG).show()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(this, "تعذر قراءة الملف: تأكد أنه بصيغة CSV صحيحة", Toast.LENGTH_LONG).show()
         }
     }
 
-    // تحليل سطر CSV مع دعم الفواصل داخل علامات التنصيص
     private fun parseCsvLine(line: String): List<String> {
         val result = mutableListOf<String>()
         val current = StringBuilder()
@@ -205,18 +218,29 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // نافذة عرض وإدارة كلمات المرور
     private fun showPasswordsDialog() {
-        val options = arrayOf(
-            "📂 استيراد من ملف CSV (Chrome/Edge)",
-            "📋 عرض كلمات المرور المحفوظة (${credentialsList.size})",
-            "🗑️ مسح جميع كلمات المرور"
-        )
+        val siteMatches = getMatchingCredentialsForCurrentSite(webView.url)
+        val optionsList = mutableListOf<String>()
+
+        if (siteMatches.isNotEmpty()) {
+            optionsList.add("⚡ تعبئة حساب لهذا الموقع (${siteMatches.size} متاح)")
+        }
+        optionsList.add("📂 استيراد من ملف CSV (Chrome/Edge)")
+        optionsList.add("📋 عرض كل كلمات المرور المحفوظة (${credentialsList.size})")
+        optionsList.add("🗑️ مسح جميع كلمات المرور")
 
         AlertDialog.Builder(this)
             .setTitle("مدير كلمات المرور")
-            .setItems(options) { _, which ->
-                when (which) {
+            .setItems(optionsList.toTypedArray()) { _, which ->
+                var index = which
+                if (siteMatches.isNotEmpty()) {
+                    if (index == 0) {
+                        showQuickFillPicker(siteMatches)
+                        return@setItems
+                    }
+                    index--
+                }
+                when (index) {
                     0 -> csvPickerLauncher.launch("*/*")
                     1 -> showSavedListDialog()
                     2 -> {
@@ -227,6 +251,23 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("إغلاق", null)
+            .show()
+    }
+
+    private fun showQuickFillPicker(matches: List<SavedCredential>) {
+        if (matches.size == 1) {
+            injectAutoFill(matches[0].username, matches[0].password)
+            Toast.makeText(this, "تمت تعبئة بيانات ${matches[0].username}", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = matches.map { "👤 ${it.username}\n🔑 ••••••••" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("اختر الحساب لتعبئته:")
+            .setItems(items) { _, idx ->
+                injectAutoFill(matches[idx].username, matches[idx].password)
+                Toast.makeText(this, "تمت التعبئة!", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("إلغاء", null)
             .show()
     }
 
@@ -274,32 +315,43 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "تم النسخ إلى الحافظة", Toast.LENGTH_SHORT).show()
     }
 
+    // حقن ذكي يملأ الحقول الظاهرة سواء كانت اسم مستخدم أو كلمة مرور أو كلاهما
     private fun injectAutoFill(username: String, password: String) {
         val safeUser = JSONObject.quote(username)
         val safePass = JSONObject.quote(password)
         val js = """
             (function() {
-                var passInputs = document.querySelectorAll('input[type="password"]');
-                if (passInputs.length > 0) {
-                    var passField = passInputs[0];
-                    passField.value = $safePass;
-                    passField.dispatchEvent(new Event('input', { bubbles: true }));
-                    passField.dispatchEvent(new Event('change', { bubbles: true }));
-
-                    var inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])'));
-                    var userField = inputs.find(i => i.offsetParent !== null);
-                    if (userField) {
-                        userField.value = $safeUser;
-                        userField.dispatchEvent(new Event('input', { bubbles: true }));
-                        userField.dispatchEvent(new Event('change', { bubbles: true }));
+                function setNativeValue(el, value) {
+                    if (!el) return;
+                    var valueSetter = Object.getOwnPropertyDescriptor(el, 'value')?.set;
+                    var prototype = Object.getPrototypeOf(el);
+                    var prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                    if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+                        prototypeValueSetter.call(el, value);
+                    } else if (valueSetter) {
+                        valueSetter.call(el, value);
+                    } else {
+                        el.value = value;
                     }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+
+                var passInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(i => i.offsetParent !== null);
+                if (passInputs.length > 0) {
+                    setNativeValue(passInputs[0], $safePass);
+                }
+
+                var userInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input[name*="user"], input[name*="email"], input[name*="login"], input:not([type])'))
+                    .filter(i => i.offsetParent !== null && i.type !== 'password' && i.type !== 'hidden' && i.type !== 'submit' && i.type !== 'search');
+                if (userInputs.length > 0) {
+                    setNativeValue(userInputs[0], $safeUser);
                 }
             })();
         """.trimIndent()
         webView.evaluateJavascript(js, null)
     }
 
-    // جسر لاستقبال كلمات المرور الجديدة عند تسجيل الدخول في أي موقع
     inner class PasswordBridge {
         @JavascriptInterface
         fun onCredentialsSubmitted(url: String, username: String, password: String) {
@@ -318,6 +370,28 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this@MainActivity, "تم حفظ كلمة المرور!", Toast.LENGTH_SHORT).show()
                         }
                         .setNegativeButton("تجاهل", null)
+                        .show()
+                }
+            }
+        }
+
+        // يُستدعى تلقائياً عند لمس حقل تسجيل الدخول في أي موقع
+        @JavascriptInterface
+        fun onLoginFieldFocused(url: String) {
+            runOnUiThread {
+                if (isPopupShowing) return@runOnUiThread
+                val matches = getMatchingCredentialsForCurrentSite(url)
+                if (matches.isNotEmpty()) {
+                    isPopupShowing = true
+                    val items = matches.map { "🔑 ${it.username}" }.toTypedArray()
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("كلمات المرور المحفوظة لـ ${extractRootDomain(url)}")
+                        .setItems(items) { _, which ->
+                            injectAutoFill(matches[which].username, matches[which].password)
+                            Toast.makeText(this@MainActivity, "تمت تعبئة الحساب", Toast.LENGTH_SHORT).show()
+                        }
+                        .setNegativeButton("تجاهل", null)
+                        .setOnDismissListener { isPopupShowing = false }
                         .show()
                 }
             }
@@ -355,10 +429,10 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.cacheMode = WebSettings.LOAD_DEFAULT
+        webView.setBackgroundColor(Color.TRANSPARENT)
         webView.addJavascriptInterface(PasswordBridge(), "AndroidPasswordVault")
         applyMediaBlockingSettings()
         applyDarkModeSettings()
-        webView.setBackgroundColor(Color.TRANSPARENT)
     }
 
     private fun applyMediaBlockingSettings() {
@@ -407,10 +481,12 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                urlInput.setText(url)
+                if (url != "about:blank") {
+                    urlInput.setText(url)
+                }
 
-                // 1. حظر الوسائط إذا كان مفعلاً
-                if (isMediaBlocked) {
+                // 1. حظر الوسائط
+                if (isMediaBlocked && url != "about:blank") {
                     val jsBlockMedia = """
                         (function() {
                             document.querySelectorAll('video, audio, source, track').forEach(el => el.remove());
@@ -422,31 +498,62 @@ class MainActivity : AppCompatActivity() {
                     view?.evaluateJavascript(jsBlockMedia, null)
                 }
 
-                // 2. مراقبة نماذج تسجيل الدخول لحفظ كلمات المرور الجديدة
-                val jsCaptureLogin = """
+                // 2. مراقب ذكي لالتقاط كلمات المرور + إظهار القائمة عند لمس أي حقل تسجيل دخول
+                val jsSmartPasswordManager = """
                     (function() {
                         if (window._passHooked) return;
                         window._passHooked = true;
+
+                        var lastUser = '';
+                        var lastPass = '';
+
+                        document.addEventListener('input', function(e) {
+                            var t = e.target;
+                            if (!t || t.tagName !== 'INPUT') return;
+                            if (t.type === 'password') {
+                                lastPass = t.value;
+                            } else if (t.type === 'text' || t.type === 'email' || t.type === 'tel' || !t.type) {
+                                lastUser = t.value;
+                            }
+                        }, true);
+
+                        document.addEventListener('focusin', function(e) {
+                            var t = e.target;
+                            if (!t || t.tagName !== 'INPUT') return;
+                            var isLoginField = (t.type === 'password' || t.type === 'email' ||
+                                (t.name && /user|email|login|pass|account/i.test(t.name)) ||
+                                (t.id && /user|email|login|pass|account/i.test(t.id)));
+                            if (isLoginField && !t.value) {
+                                AndroidPasswordVault.onLoginFieldFocused(window.location.href);
+                            }
+                        }, true);
+
                         document.addEventListener('submit', function(e) {
-                            var form = e.target;
-                            var passInput = form.querySelector('input[type="password"]');
-                            if (passInput && passInput.value) {
-                                var userInput = form.querySelector('input[type="text"], input[type="email"], input[type="tel"], input:not([type])');
-                                var userVal = userInput ? userInput.value : '';
-                                AndroidPasswordVault.onCredentialsSubmitted(window.location.href, userVal, passInput.value);
+                            if (lastPass) {
+                                AndroidPasswordVault.onCredentialsSubmitted(window.location.href, lastUser, lastPass);
+                            }
+                        }, true);
+
+                        document.addEventListener('click', function(e) {
+                            var btn = e.target.closest('button, input[type="submit"], [role="button"]');
+                            if (btn && lastPass) {
+                                setTimeout(function() {
+                                    AndroidPasswordVault.onCredentialsSubmitted(window.location.href, lastUser, lastPass);
+                                }, 400);
                             }
                         }, true);
                     })();
                 """.trimIndent()
-                view?.evaluateJavascript(jsCaptureLogin, null)
+                view?.evaluateJavascript(jsSmartPasswordManager, null)
 
-                // 3. التعبئة التلقائية إذا كان الموقع محفوظاً مسبقاً
-                if (url != null) {
-                    val currentDomain = extractRootDomain(url)
-                    val match = credentialsList.firstOrNull { currentDomain.contains(it.domain) }
-                    if (match != null) {
-                        injectAutoFill(match.username, match.password)
-                    }
+                // 3. محاولة تعبئة تلقائية فورية
+                val matches = getMatchingCredentialsForCurrentSite(url)
+                if (matches.isNotEmpty()) {
+                    injectAutoFill(matches[0].username, matches[0].password)
+                    // إعادة المحاولة بعد ثانية واحدة للمواقع التي تحمّل الحقول ببطء
+                    view?.postDelayed({
+                        injectAutoFill(matches[0].username, matches[0].password)
+                    }, 1200)
                 }
             }
         }
@@ -497,7 +604,10 @@ class MainActivity : AppCompatActivity() {
             webView.reload()
         }
 
-        btnHome.setOnClickListener { loadUrl("https://www.google.com") }
+        btnHome.setOnClickListener {
+            urlInput.setText("")
+            webView.loadUrl("about:blank")
+        }
         btnReload.setOnClickListener { webView.reload() }
     }
 

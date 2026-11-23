@@ -6,6 +6,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -51,8 +53,6 @@ class MainActivity : AppCompatActivity() {
 
     private var isMediaBlocked = true
     private var isDarkModeEnabled = true
-    private var isOfflineCacheEnabled = true
-
     private val adHostsSet = HashSet<String>()
     private val credentialsList = mutableListOf<SavedCredential>()
     private val historyList = mutableListOf<HistoryItem>()
@@ -103,37 +103,27 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().flush()
     }
 
-    // --- حساب حجم الكاش وتفريغه ---
-
-    private fun getFolderSize(dir: File?): Long {
-        if (dir == null || !dir.exists()) return 0L
-        var size = 0L
-        dir.listFiles()?.forEach { file ->
-            size += if (file.isDirectory) getFolderSize(file) else file.length()
-        }
-        return size
+    private fun isNetworkAvailable(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
-    private fun getCacheSizeMB(): String {
-        val totalBytes = getFolderSize(cacheDir) + getFolderSize(File(applicationInfo.dataDir, "app_webview"))
-        val mb = totalBytes / (1024.0 * 1024.0)
-        return String.format(Locale.US, "%.2f MB", mb)
-    }
+    // --- سجل تصفح دائم وغير محدود على ذاكرة الهاتف ---
 
-    private fun clearBrowserCache() {
-        webView.clearCache(true)
-        cacheDir.deleteRecursively()
-        Toast.makeText(this, "تم تفريغ ذاكرة التخزين المؤقت", Toast.LENGTH_SHORT).show()
-    }
-
-    // --- إدارة سجل التصفح الدائم غير المحدود ---
+    private fun getHistoryFile(): File = File(filesDir, "unlimited_history.json")
 
     private fun loadHistory() {
         historyList.clear()
-        val file = File(filesDir, "unlimited_history.json")
-        if (!file.exists()) return
         try {
-            val array = JSONArray(file.readText())
+            val file = getHistoryFile()
+            val jsonStr = if (file.exists()) {
+                file.readText()
+            } else {
+                getSharedPreferences("LiteBrowserVault", Context.MODE_PRIVATE).getString("history", "[]") ?: "[]"
+            }
+            val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
                 historyList.add(
@@ -150,7 +140,7 @@ class MainActivity : AppCompatActivity() {
     private fun addToHistory(title: String?, url: String?) {
         if (url.isNullOrBlank() || url == "about:blank") return
         val cleanTitle = if (title.isNullOrBlank()) url else title
-        val timeStr = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date())
+        val timeStr = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date())
 
         if (historyList.isNotEmpty() && historyList[0].url == url) return
 
@@ -169,7 +159,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 array.put(obj)
             }
-            File(filesDir, "unlimited_history.json").writeText(array.toString())
+            getHistoryFile().writeText(array.toString())
         } catch (_: Exception) { }
     }
 
@@ -182,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         val items = historyList.map { "🕒 ${it.time} - ${it.title}\n🔗 ${it.url}" }.toTypedArray()
 
         AlertDialog.Builder(this)
-            .setTitle("سجل التصفح الدائم (${historyList.size} صفحة)")
+            .setTitle("سجل التصفح الدائم (${historyList.size})")
             .setItems(items) { _, index ->
                 loadUrl(historyList[index].url)
             }
@@ -341,14 +331,12 @@ class MainActivity : AppCompatActivity() {
             optionsList.add("⚡ تعبئة حساب لهذا الموقع (${siteMatches.size} متاح)")
         }
         optionsList.add("🕒 سجل التصفح الدائم (${historyList.size})")
-        optionsList.add("💾 توفير البيانات بالكاش (${getCacheSizeMB()}) - ${if (isOfflineCacheEnabled) "مفعل ✅" else "معطل ❌"}")
-        optionsList.add("🧹 تفريغ ذاكرة التخزين المؤقت")
-        optionsList.add("📂 استيراد كلمات المرور من CSV")
-        optionsList.add("📋 عرض كلمات المرور المحفوظة (${credentialsList.size})")
+        optionsList.add("📂 استيراد من ملف CSV (Chrome/Edge)")
+        optionsList.add("📋 عرض كل كلمات المرور المحفوظة (${credentialsList.size})")
         optionsList.add("🗑️ مسح جميع كلمات المرور")
 
         AlertDialog.Builder(this)
-            .setTitle("البيانات والتخزين وكلمات المرور")
+            .setTitle("البيانات وكلمات المرور")
             .setItems(optionsList.toTypedArray()) { _, which ->
                 var index = which
                 if (siteMatches.isNotEmpty()) {
@@ -360,23 +348,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 when (index) {
                     0 -> showHistoryDialog()
-                    1 -> {
-                        isOfflineCacheEnabled = !isOfflineCacheEnabled
-                        webView.settings.cacheMode = if (isOfflineCacheEnabled) {
-                            WebSettings.LOAD_CACHE_ELSE_NETWORK
-                        } else {
-                            WebSettings.LOAD_DEFAULT
-                        }
-                        Toast.makeText(
-                            this,
-                            if (isOfflineCacheEnabled) "تم تفعيل القراءة من الكاش لتوفير الإنترنت" else "تم التبديل للوضع العادي",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                    2 -> clearBrowserCache()
-                    3 -> csvPickerLauncher.launch("*/*")
-                    4 -> showSavedListDialog()
-                    5 -> {
+                    1 -> csvPickerLauncher.launch("*/*")
+                    2 -> showSavedListDialog()
+                    3 -> {
                         credentialsList.clear()
                         persistCredentials()
                         Toast.makeText(this, "تم مسح جميع كلمات المرور", Toast.LENGTH_SHORT).show()
@@ -529,7 +503,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- إعدادات المتصفح الأساسية ---
+    // --- إعدادات المتصفح الأساسية والتخزين المؤقت الدائم ---
 
     private fun loadAdHostsFromAssets() {
         adHostsSet.addAll(
@@ -560,12 +534,14 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
-        settings.cacheMode = if (isOfflineCacheEnabled) {
+
+        // استخدام ذاكرة الهاتف المخزنة أولاً لتوفير الإنترنت وعدم إعادة تحميل الصفحات والخرائط
+        settings.cacheMode = if (isNetworkAvailable()) {
             WebSettings.LOAD_CACHE_ELSE_NETWORK
         } else {
-            WebSettings.LOAD_DEFAULT
+            WebSettings.LOAD_CACHE_ONLY
         }
-        // إزالة التعديل اليدوي على User-Agent لتطابق بصمة الجهاز الحقيقية ولا يشك فيها نظام Captcha
+
         @Suppress("DEPRECATION")
         settings.saveFormData = true
 
@@ -613,15 +589,8 @@ class MainActivity : AppCompatActivity() {
                 val host = uri.host?.lowercase() ?: ""
                 val urlString = uri.toString().lowercase()
 
-                // السماح لنظام التحقق الأمني (reCAPTCHA) بالعمل دون حظر
-                if (urlString.contains("recaptcha") || host.contains("gstatic.com")) {
-                    return super.shouldInterceptRequest(view, request)
-                }
-
-                // 1. حظر الإعلانات
                 if (isAdHost(host)) return emptyResponse()
 
-                // 2. حظر الوسائط الثقيلة إذا كان الحظر مفعلاً
                 if (isMediaBlocked) {
                     val blockedExtensions = listOf(".mp4", ".webm", ".gif", ".m3u8", ".ts", ".avi", ".mov", ".webp", ".jpg", ".jpeg", ".png", ".svg")
                     if (blockedExtensions.any { urlString.contains(it) }) return emptyResponse()
@@ -639,10 +608,7 @@ class MainActivity : AppCompatActivity() {
                     addToHistory(view?.title, url)
                 }
 
-                // عدم إخفاء عناصر الصفحة إذا كانت صفحة تحقق أمان (Sorry / Captcha)
-                val isCaptchaPage = url?.contains("/sorry/") == true || url?.contains("captcha") == true
-
-                if (isMediaBlocked && url != "about:blank" && !isCaptchaPage) {
+                if (isMediaBlocked && url != "about:blank") {
                     val jsBlockMedia = """
                         (function() {
                             document.querySelectorAll('video, audio, source, track').forEach(el => el.remove());
@@ -765,30 +731,29 @@ class MainActivity : AppCompatActivity() {
             showHistoryDialog()
             true
         }
-        btnReload.setOnClickListener { webView.reload() }
-        btnReload.setOnLongClickListener {
-            webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
-            Toast.makeText(this, "جاري تحديث الصفحة من الإنترنت...", Toast.LENGTH_SHORT).show()
+        btnReload.setOnClickListener {
+            webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
             webView.reload()
-            if (isOfflineCacheEnabled) {
-                webView.postDelayed({
-                    webView.settings.cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
-                }, 3000)
-            }
-            true
+            webView.postDelayed({
+                webView.settings.cacheMode = WebSettings.LOAD_CACHE_ELSE_NETWORK
+            }, 2000)
         }
     }
 
     private fun loadUrl(input: String) {
         var url = input.trim()
         if (url.isEmpty()) return
+
+        // تحديث وضع الكاش تلقائياً حسب توفر الإنترنت
+        webView.settings.cacheMode = if (isNetworkAvailable()) {
+            WebSettings.LOAD_CACHE_ELSE_NETWORK
+        } else {
+            WebSettings.LOAD_CACHE_ONLY
+        }
+
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = if (url.contains(".") && !url.contains(" ")) {
-                "https://$url"
-            } else {
-                // استخدام DuckDuckGo للبحث السريع بدون إزعاج Captcha عند تشغيل VPN
-                "https://html.duckduckgo.com/html/?q=${Uri.encode(url)}"
-            }
+            url = if (url.contains(".") && !url.contains(" ")) "https://$url"
+            else "https://www.google.com/search?q=${Uri.encode(url)}"
         }
         webView.loadUrl(url)
     }
